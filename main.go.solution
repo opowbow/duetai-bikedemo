@@ -1,0 +1,93 @@
+package main
+
+import (
+	"html/template"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+
+	"cloud.google.com/go/bigquery"
+	"golang.org/x/net/context"
+	"google.golang.org/api/iterator"
+)
+
+type PageData struct {
+	PageTitle  string
+	MapsApiKey string
+	Stations   []BikeStation
+}
+
+type BikeStation struct {
+	Name               string
+	Latitude           float64
+	Longitude          float64
+	BikesCount         int
+	BikesVisualization string
+}
+
+func bikeIndication(numberOfBikes int) string {
+	// return a string that contains the bike emoji numberOfBikes times
+	var indication string
+	for i := 0; i < numberOfBikes; i++ {
+		indication += "🚲 "
+	}
+	return strings.Trim(indication, " ")
+}
+
+func loadBikeStationData() []BikeStation {
+	log.Println("Loading bike station data...")
+	var data []BikeStation
+	ctx := context.Background()
+	client, err := bigquery.NewClient(ctx, os.Getenv("PROJECT_ID"))
+	if err != nil {
+		log.Fatal("invalid client", err)
+	}
+
+	q := client.Query("SELECT latitude, longitude, bikes_count as bikescount, name FROM `bigquery-public-data.london_bicycles.cycle_stations` ORDER BY bikes_count DESC LIMIT 50")
+	it, err := q.Read(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for {
+		var station BikeStation
+		err := it.Next(&station)
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		station.BikesVisualization = bikeIndication(station.BikesCount)
+
+		data = append(data, station)
+	}
+	return data
+
+}
+
+func main() {
+
+	MapsApiKey := os.Getenv("MAPS_KEY")
+	if MapsApiKey == "" {
+		log.Fatal("Missing MAPS_API_KEY")
+	}
+
+	tmpl := template.Must(template.ParseFiles("template.html"))
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// assemble data for templating
+		data := PageData{
+			PageTitle:  "London Bike Stations",
+			MapsApiKey: MapsApiKey,
+			Stations:   loadBikeStationData(),
+		}
+
+		tmpl.Execute(w, data)
+	})
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8084"
+		log.Printf("Defaulting to port %s", port)
+	}
+	http.ListenAndServe(":"+port, nil)
+}
